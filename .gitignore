@@ -1,0 +1,46 @@
+# Dont commit changes to these
+###################
+*.o
+*.a
+*.elf
+*.bin
+*.map
+*.hex
+*.dis
+*.exe
+*.log
+build/
+sdkconfig.old
+managed_components/
+.config
+*.pyc
+language.settings.xml
+*.SVDat
+*.bak
+.ccache/
+
+# eclipse setting
+.settings
+
+# MacOS directory files
+.DS_Store
+
+# gcov coverage reports
+*.gcda
+*.gcno
+coverage.info
+coverage_report/
+
+#espfs might put this junk here
+node_modules/
+/package-lock.json
+/package.json
+
+# don't commit vs-code workspaces because they keep adding file associations
+*.code-workspace
+.vscode/settings.json
+cache
+*cache*
+compile_commands.json
+*.el
+*~

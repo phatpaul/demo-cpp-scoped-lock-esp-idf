@@ -1,0 +1,15 @@
+{
+    "configurations": [
+        {
+            "name": "test",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "compileCommands": "${workspaceFolder}/test/build/compile_commands.json",
+            "includePath": [
+                "${workspaceFolder}/test/build/config"
+            ],
+            "configurationProvider": "ms-vscode.cmake-tools"
+        },
+    ],
+    "version": 4
+}
