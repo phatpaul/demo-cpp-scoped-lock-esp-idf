@@ -9,12 +9,8 @@ SCRIPT_DIR=$(realpath "$(dirname "${BASH_SOURCE[0]}")")
 # this only works when sourced (not run as a script), because it is adding variables into the local shell
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && echo "Error, must source this script!  Try: \"source ${BASH_SOURCE[0]}\"" && exit 1
 
-if [ -z "${IDF_PATH}" ]
-then
-    # IDF_PATH not set in the environment.  Try this hardcoded path.
-    IDF_PATH=~/esp/esp-idf-v4.4.8
-fi
-
+# Don't use IDF_PATH set in the environment.  Use this hardcoded path.
+IDF_PATH=~/esp/esp-idf-v5.4.1
 
 # enable ccache to greatly speed-up the build (i.e. fast subsequent builds after a clean)
 export IDF_CCACHE_ENABLE=1
@@ -28,4 +24,4 @@ ESPBAUD=2000000
 # These commands will not execute, but will be in the history for convenience.
 history -s idf menuconfig
 history -s idf build flash -b 2000000 -p /dev/ttyUSB1 monitor
-history -s idf build flash monitor 
+history -s idf build flash monitor

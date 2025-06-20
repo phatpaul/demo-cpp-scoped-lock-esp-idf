@@ -10,7 +10,7 @@
 #include <map>
 #include <memory>
 
-#include "ScopedLockAccess.hpp"
+#include "LockableObject.hpp"
 
 /**
  * Represents the contents of the database
@@ -20,5 +20,5 @@ struct MyConfigDb
     std::map<std::string, std::string> settings; // Example settings map
 };
 
-using MyConfigDbManager = ScopedLockAccess<MyConfigDb>;
+using MyConfigDbManager = LockableObject<MyConfigDb>;
 

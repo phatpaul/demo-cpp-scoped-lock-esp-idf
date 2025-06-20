@@ -1,16 +1,17 @@
 /*
- * ScopedLockAccess.hpp
- *  C++ class for a scoped lock access to a Db instance.
+ * LockableObject.hpp
+ *  C++ class for a scoped lock access to an object.
  *
  *  Created on: May 15, 2024
- *      Author: Paul Abbott
+ *      Author: Paul Abbott, Lumitec LLC
  */
 #pragma once
 
+#include <mutex>
 #include <shared_mutex>
 
-template <typename dbType>
-class ScopedLockAccess
+template <typename protectedType>
+class LockableObject
 {
 public:
     using mutex_type = std::shared_mutex;
@@ -19,16 +20,17 @@ public:
 
 private:
     mutable mutex_type m_mutex{};
-    dbType m_db{};
-    static inline ScopedLockAccess *sm_instance{}; // Optional instance pointer
+    protectedType m_protected{};
+    static inline LockableObject *sm_instance{}; // Optional instance pointer
 
 public:
-    // Set Static Dependencies
-    static void setStaticInstance(ScopedLockAccess *ptr)
+    // Optional Set Static Instance (when used as a singleton)
+    static void setStaticInstance(LockableObject *ptr)
     {
         sm_instance = ptr;
     };
-    static ScopedLockAccess &getManager()
+    // Optional Get Static Instance (when used as a singleton)
+    static LockableObject &getInstance()
     {
         assert(sm_instance); // Dependency must be provided before use!
         return *sm_instance;
@@ -39,15 +41,16 @@ public:
     //read_lock lock_for_reading() const { return read_lock(m_mutex, std::try_to_lock); }
 
     // returns a scoped lock that allows only one writer and no one else
-    write_lock lock_for_writing() { return write_lock(m_mutex); }
+    //write_lock lock_for_writing() { return write_lock(m_mutex); }
+    //-- Prefer to only allow access to the protected object using ScopedAccess class
 
-    template <class T, class lockType>
-    class Access
+    template <class objType, class lockType>
+    class ScopedAccess
     {
     public:
         // Constructor
-        Access(mutex_type &m, T &obj, bool blocking = true)
-            : m_db{obj}
+        ScopedAccess(mutex_type &m, objType &obj, bool blocking = true)
+            : m_protectedRef{obj}
         {
             if (blocking)
             {
@@ -60,7 +63,7 @@ public:
         }
 
         // only allow access to the pointer with -> operator to prevent copying the protected object
-        dbType *operator->() { return &m_db; }
+        objType *operator->() const { return &m_protectedRef; }
 
         // operator bool
         //  - returns whether the exclusive lock is still active
@@ -72,26 +75,30 @@ public:
         }
 
     private:
-        // a scoped lock that exists as long as this instance of Access class lives
+        // a scoped lock that exists as long as this instance of ScopedAccess class lives
         lockType m_lock;
         // Reference to the protected resource
-        T &m_db;
+        objType &m_protectedRef;
     };
 
-    using ReadAccess = Access<dbType, read_lock>;
-    using WriteAccess = Access<dbType, write_lock>;
+    using ReadAccess = ScopedAccess<protectedType, read_lock>;
+    using WriteAccess = ScopedAccess<protectedType, write_lock>;
 
     ReadAccess getReadAccess()
     {
-        return ReadAccess(m_mutex, m_db, false); // don't block for read
+        return ReadAccess(m_mutex, m_protected, false); // don't block for read
     }
     WriteAccess getWriteAccess()
     {
-        return WriteAccess(m_mutex, m_db, true); // block for write
+        return WriteAccess(m_mutex, m_protected, true); // block for write
     }
-    void resetDb(void)
+
+    // Clear the protected object, effectively resetting it.
+    void reset(void)
     {
-        auto lock = lock_for_writing();
-        m_db = {}; // I hope this properly deconstructs the old stuff...
+        if (auto lock = getWriteAccess())
+        {
+            m_protected = {}; // Clear the protected object. I hope this properly deconstructs the old object.
+        }
     }
 };

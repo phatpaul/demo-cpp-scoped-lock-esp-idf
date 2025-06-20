@@ -58,7 +58,7 @@ TEST_CASE("Locking with global", TAG)
     MyConfigDbManager::setStaticInstance(&g_MyConfigDbManager); // register dependencies with the VirtualSwitch class
 
     bool gotReadLock = false;
-    if (auto dbAccess = MyConfigDbManager::getManager().getReadAccess()) // get scoped read lock
+    if (auto dbAccess = MyConfigDbManager::getInstance().getReadAccess()) // get scoped read lock
     {
         gotReadLock = true;
     }
@@ -66,11 +66,11 @@ TEST_CASE("Locking with global", TAG)
 
     bool gotWriteLock = false;
     bool gotReadWhileWriteLock = false;
-    if (auto writeLock = MyConfigDbManager::getManager().getWriteAccess()) // get EXCLUSIVE write lock
+    if (auto writeLock = MyConfigDbManager::getInstance().getWriteAccess()) // get EXCLUSIVE write lock
     {
         gotWriteLock = true;
         // getReadAccess should not block!
-        if (auto dbAccess = MyConfigDbManager::getManager().getReadAccess()) // get scoped read lock
+        if (auto dbAccess = MyConfigDbManager::getInstance().getReadAccess()) // get scoped read lock
         {
             gotReadWhileWriteLock = true;
         }
@@ -79,7 +79,7 @@ TEST_CASE("Locking with global", TAG)
     TEST_ASSERT_FALSE_MESSAGE(gotReadWhileWriteLock, "Should not get read lock while write.");
 
     gotReadLock = false;
-    if (auto dbAccess = MyConfigDbManager::getManager().getReadAccess()) // get scoped read lock
+    if (auto dbAccess = MyConfigDbManager::getInstance().getReadAccess()) // get scoped read lock
     {
         gotReadLock = true;
     }
@@ -91,12 +91,12 @@ TEST_CASE("Two simulaneous read locks are allowed", TAG)
     MyConfigDbManager::setStaticInstance(&g_MyConfigDbManager); // register dependencies with the VirtualSwitch class
 
     bool gotReadLock1 = false;
-    if (auto dbAccess1 = MyConfigDbManager::getManager().getReadAccess()) // get scoped read lock
+    if (auto dbAccess1 = MyConfigDbManager::getInstance().getReadAccess()) // get scoped read lock
     {
         gotReadLock1 = true;
 
         bool gotReadLock2 = false;
-        if (auto dbAccess2 = MyConfigDbManager::getManager().getReadAccess()) // get another scoped read lock
+        if (auto dbAccess2 = MyConfigDbManager::getInstance().getReadAccess()) // get another scoped read lock
         {
             gotReadLock2 = true;
         }
@@ -110,12 +110,12 @@ TEST_CASE("Two simulaneous read locks are allowed", TAG)
 //     MyConfigDbManager::setStaticInstance(&g_MyConfigDbManager); // register dependencies with the VirtualSwitch class
 
 //     bool gotWriteLock1 = false;
-//     if (auto dbAccess1 = MyConfigDbManager::getManager().getWriteAccess()) // get EXCLUSIVE write lock
+//     if (auto dbAccess1 = MyConfigDbManager::getInstance().getWriteAccess()) // get EXCLUSIVE write lock
 //     {
 //         gotWriteLock1 = true;
 
 //         bool gotWriteLock2 = false;
-//         if (auto dbAccess2 = MyConfigDbManager::getManager().getWriteAccess()) // try to get another EXCLUSIVE write lock
+//         if (auto dbAccess2 = MyConfigDbManager::getInstance().getWriteAccess()) // try to get another EXCLUSIVE write lock
 //         {
 //             gotWriteLock2 = true;
 //         }
@@ -130,12 +130,12 @@ TEST_CASE("Many simulaneous read locks are allowed in single thread", TAG)
     MyConfigDbManager::setStaticInstance(&g_MyConfigDbManager); // register dependencies with the VirtualSwitch class
     // we will try to get 10 read locks in a row
     // this should not block, and should not fail
-    auto dbAccess0 = MyConfigDbManager::getManager().getReadAccess(); // get scoped read lock
-    auto dbAccess1 = MyConfigDbManager::getManager().getReadAccess(); // get another scoped read lock
-    auto dbAccess2 = MyConfigDbManager::getManager().getReadAccess(); // get another scoped read lock
-    auto dbAccess3 = MyConfigDbManager::getManager().getReadAccess(); // get another scoped read lock
-    auto dbAccess4 = MyConfigDbManager::getManager().getReadAccess(); // get another scoped read lock
-    auto dbAccess5 = MyConfigDbManager::getManager().getReadAccess(); // get another scoped read lock
+    auto dbAccess0 = MyConfigDbManager::getInstance().getReadAccess(); // get scoped read lock
+    auto dbAccess1 = MyConfigDbManager::getInstance().getReadAccess(); // get another scoped read lock
+    auto dbAccess2 = MyConfigDbManager::getInstance().getReadAccess(); // get another scoped read lock
+    auto dbAccess3 = MyConfigDbManager::getInstance().getReadAccess(); // get another scoped read lock
+    auto dbAccess4 = MyConfigDbManager::getInstance().getReadAccess(); // get another scoped read lock
+    auto dbAccess5 = MyConfigDbManager::getInstance().getReadAccess(); // get another scoped read lock
     if (!dbAccess0)
     {
         TEST_FAIL_MESSAGE("Failed to get read lock 0.");
@@ -169,7 +169,7 @@ TEST_CASE("Many sequential read locks are allowed", TAG)
     // this should not block, and should not fail
     for (int i = 0; i < 100; i++)
     {
-        auto dbAccess = MyConfigDbManager::getManager().getReadAccess(); // get scoped read lock
+        auto dbAccess = MyConfigDbManager::getInstance().getReadAccess(); // get scoped read lock
         if (!dbAccess)
         {
             ESP_LOGE(TAG, "Failed to get read lock %d.", i);
@@ -179,19 +179,19 @@ TEST_CASE("Many sequential read locks are allowed", TAG)
 }
 
 #define NUM_READ_LOCKS 10
-static SemaphoreHandle_t task_done_semphr = nullptr; // semaphore to signal tasks are done
-static EventGroupHandle_t task_eventgroup = nullptr; // event group to signal tasks to stop
+static SemaphoreHandle_t task_done_semphr;
+static EventGroupHandle_t task_eventgroup;
 #define TRIGGER_TASK_STOP_BIT (1 << 0)
-static volatile int read_locks_aquired = 0; // global counter for read locks acquired
+static volatile int read_locks_aquired = 0;
 
 static void multiThreadReadLockFunc(void *arg)
 {
     // thread index is arg
     int threadIndex = *(int *)arg;
     ESP_LOGD(TAG, "Thread %d starting.", threadIndex);
-    if (auto dbAccess = MyConfigDbManager::getManager().getReadAccess()) // get scoped read lock
+    if (auto dbAccess = MyConfigDbManager::getInstance().getReadAccess()) // get scoped read lock
     {
-        read_locks_aquired++; // increment the global counter for read locks acquired
+        read_locks_aquired = read_locks_aquired + 1; // increment the global counter for read locks acquired
         // dbAccess-> // just to use the dbAccess and not optimize it out
         ESP_LOGD(TAG, "Thread %d got read lock.", threadIndex);
         // signal the test that we are done
@@ -246,7 +246,7 @@ TEST_CASE("Multiple simultaneous readlocks in multiple threads", TAG)
         xSemaphoreTake(task_done_semphr, portMAX_DELAY);
     }
 
-    // cleanup before any assertions, because TEST_ASSERT fail will abort the test and not run cleanup code
+    // Do cleanup before any assertions, because TEST_ASSERT fail will abort the test and not run cleanup code
 
     // trigger tasks to stop and delete themselves
     xEventGroupSetBits(task_eventgroup, TRIGGER_TASK_STOP_BIT);
@@ -268,7 +268,6 @@ TEST_CASE("Multiple simultaneous readlocks in multiple threads", TAG)
 #if ENABLE_STRESS_TEST
 static volatile int read_locks_failed = 0;     // global counter for read locks failed
 static volatile bool stop_stress_test = false; // global flag to stop the stress test
-
 static void stressReadLockFunc(void *arg)
 {
     // thread index is arg
@@ -279,14 +278,14 @@ static void stressReadLockFunc(void *arg)
     while (false == stop_stress_test)
     { // run until the stop signal is set{
         // wait for the stop signal to be cleared
-        if (auto dbAccess = MyConfigDbManager::getManager().getReadAccess()) // get scoped read lock
+        if (auto dbAccess = MyConfigDbManager::getInstance().getReadAccess()) // get scoped read lock
         {
-            read_locks_aquired++; // increment the global counter for read locks acquired
+            read_locks_aquired = read_locks_aquired + 1; // increment the global counter for read locks acquired
         }
         else
         {
             ESP_LOGE(TAG, "Thread %d failed to get read lock.", threadIndex);
-            read_locks_failed++; // increment the global counter for read locks failed
+            read_locks_failed = read_locks_failed + 1; // increment the global counter for read locks failed
         }
         vTaskDelay(1); // yield to other tasks
     }
