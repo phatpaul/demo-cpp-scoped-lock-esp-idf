@@ -7,16 +7,25 @@
  */
 #pragma once
 
-#include <mutex>
 #include <shared_mutex>
+#include "ReliableSharedMutex.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
 
 template <typename protectedType>
 class LockableObject
 {
 public:
-    using mutex_type = std::shared_mutex;
-    using read_lock = std::shared_lock<mutex_type>;
-    using write_lock = std::unique_lock<mutex_type>;
+    // Option 1: Use reliable FreeRTOS-based implementation
+    using mutex_type = ReliableSharedMutex;
+    using read_lock = shared_lock<mutex_type>;
+    using write_lock = unique_lock<mutex_type>;
+
+    // Option 2: Keep std implementation for comparison (comment out above and uncomment below)
+    // using mutex_type = std::shared_mutex;
+    // using read_lock = std::shared_lock<mutex_type>;
+    // using write_lock = std::unique_lock<mutex_type>;
 
 private:
     mutable mutex_type m_mutex{};
@@ -50,16 +59,10 @@ public:
     public:
         // Constructor
         ScopedAccess(mutex_type &m, objType &obj, bool blocking = true)
-            : m_protectedRef{obj}
+            : m_protectedRef{obj},
+              m_lock{blocking ? lockType(m) : lockType(m, std::try_to_lock)}
         {
-            if (blocking)
-            {
-                m_lock = lockType(m);
-            }
-            else // non-blocking
-            {
-                m_lock = lockType(m, std::try_to_lock);
-            }
+            // Direct initialization in member initializer list
         }
 
         // only allow access to the pointer with -> operator to prevent copying the protected object
@@ -75,10 +78,10 @@ public:
         }
 
     private:
-        // a scoped lock that exists as long as this instance of ScopedAccess class lives
-        lockType m_lock;
         // Reference to the protected resource
         objType &m_protectedRef;
+        // a scoped lock that exists as long as this instance of ScopedAccess class lives
+        lockType m_lock;
     };
 
     using ReadAccess = ScopedAccess<protectedType, read_lock>;
@@ -87,6 +90,33 @@ public:
     ReadAccess getReadAccess()
     {
         return ReadAccess(m_mutex, m_protected, false); // don't block for read
+    }
+
+    // Alternative with retry logic for ESP-IDF shared_mutex bug workaround
+    ReadAccess getReadAccessWithRetry(int max_retries = 3)
+    {
+        static const char* TAG = "LockableObject";
+        for (int attempt = 0; attempt < max_retries; ++attempt) {
+            auto access = ReadAccess(m_mutex, m_protected, false);
+            if (access) {
+                if (attempt > 0) {
+                    ESP_LOGW(TAG, "Read lock succeeded on attempt %d (task: %s)",
+                             attempt + 1, pcTaskGetTaskName(xTaskGetCurrentTaskHandle()));
+                }
+                return access;
+            }
+            ESP_LOGW(TAG, "Read lock failed on attempt %d (task: %s), retrying...",
+                     attempt + 1, pcTaskGetTaskName(xTaskGetCurrentTaskHandle()));
+            // Brief delay before retry
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        // Final attempt
+        auto final_access = ReadAccess(m_mutex, m_protected, false);
+        if (!final_access) {
+            ESP_LOGE(TAG, "Read lock failed after %d attempts (task: %s)",
+                     max_retries + 1, pcTaskGetTaskName(xTaskGetCurrentTaskHandle()));
+        }
+        return final_access;
     }
     WriteAccess getWriteAccess()
     {

@@ -178,7 +178,7 @@ TEST_CASE("Many sequential read locks are allowed", TAG)
     }
 }
 
-#define NUM_READ_LOCKS 10
+#define NUM_READ_LOCKS 20 // Increased from 10 to 20 for more stress
 static SemaphoreHandle_t task_done_semphr;
 static EventGroupHandle_t task_eventgroup;
 #define TRIGGER_TASK_STOP_BIT (1 << 0)
@@ -284,12 +284,14 @@ static void stressReadLockFunc(void *arg)
         }
         else
         {
-            ESP_LOGE(TAG, "Thread %d failed to get read lock.", threadIndex);
+            ESP_LOGE(TAG, "Thread %d failed to get read lock. Total acquired: %d, Total failed: %d", 
+                     threadIndex, read_locks_aquired, read_locks_failed + 1);
             read_locks_failed = read_locks_failed + 1; // increment the global counter for read locks failed
         }
         vTaskDelay(1); // yield to other tasks
     }
     // signal the test that we are done
+    free(arg); // Free the dynamically allocated thread index
     xSemaphoreGive(task_done_semphr);
     vTaskDelete(nullptr); // delete this task when done
     // Note: we don't need to explicitly release the lock, it will be released when dbAccess goes out of scope
@@ -314,12 +316,15 @@ TEST_CASE("locking stress-test", TAG)
     // create several tasks that will try to acquire read locks simultaneously
     for (int i = 0; i < NUM_READ_LOCKS; i++)
     {
+        int *task_index = (int*)malloc(sizeof(int));
+        *task_index = i;
+        
         const int core_num = (i % portNUM_PROCESSORS);              // pin to core 0 or 1, depending on the index
         const int task_priority = ESP_TASK_MAIN_PRIO + 1 + (i % 4); // alternate priorities for the tasks
         xTaskCreatePinnedToCore(stressReadLockFunc,
                                 "ReadLockThread",
                                 2048,          // stack size
-                                &i,            // pass the index as an argument to the task
+                                task_index,    // pass the index as an argument to the task
                                 task_priority, // priority of the task, should be higher than the test task
                                 nullptr,       // we don't need the task handle, so pass nullptr
                                 core_num);     // pin to core 0 or 1, depending on the index
@@ -335,7 +340,7 @@ TEST_CASE("locking stress-test", TAG)
 
     ESP_LOGD(TAG, "All tasks started, now wait for stress test...");
     // Now we will let the tasks run for a while, acquiring read locks
-    vTaskDelay(10000 / portTICK_PERIOD_MS); // let the tasks run for 1 second
+    vTaskDelay(15000 / portTICK_PERIOD_MS); // Increased from 10 to 15 seconds
 
     ESP_LOGD(TAG, "Stress test done, got %d read locks", read_locks_aquired);
 
@@ -354,4 +359,263 @@ TEST_CASE("locking stress-test", TAG)
 
     TEST_ASSERT_EQUAL_MESSAGE(0, read_locks_failed, "Expected no read locks to fail during stress test.");
 }
+
+// Variables for mixed read/write stress test
+static volatile int write_locks_acquired = 0;
+static volatile int write_locks_failed = 0;
+static volatile bool stop_mixed_test = false;
+
+static void mixedReadWriteFunc(void *arg)
+{
+    int threadIndex = *(int *)arg;
+    bool isWriter = (threadIndex % 4 == 0); // Every 4th thread is a writer (less writers)
+    
+    ESP_LOGD(TAG, "Mixed test thread %d starting as %s.", threadIndex, isWriter ? "WRITER" : "READER");
+    xSemaphoreGive(task_done_semphr);
+    
+    int local_ops = 0;
+    while (!stop_mixed_test && local_ops < 200) { // Reduced operations per thread
+        if (isWriter) {
+            // Writer thread - try to get exclusive access
+            if (auto dbAccess = MyConfigDbManager::getInstance().getWriteAccess()) {
+                write_locks_acquired++;
+                // Hold the lock for a very short time to reduce reader starvation
+                vTaskDelay(pdMS_TO_TICKS(2)); // Reduced from longer hold time
+            } else {
+                write_locks_failed++;
+                ESP_LOGE(TAG, "Thread %d failed to get WRITE lock.", threadIndex);
+            }
+        } else {
+            // Reader thread - try to get shared access
+            if (auto dbAccess = MyConfigDbManager::getInstance().getReadAccess()) {
+                read_locks_aquired++;
+                // Brief hold time for readers
+                if (local_ops % 20 == 0) { // Only occasionally hold the lock
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                }
+            } else {
+                read_locks_failed++;
+                ESP_LOGE(TAG, "Thread %d failed to get READ lock. This should not happen unless writer is active!", threadIndex);
+            }
+        }
+        local_ops++;
+        
+        // Variable delay to create different access patterns
+        if (isWriter) {
+            vTaskDelay(pdMS_TO_TICKS(5)); // Writers wait longer between attempts
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(2)); // Readers attempt more frequently
+        }
+    }
+    
+    ESP_LOGD(TAG, "Mixed test thread %d completed %d operations.", threadIndex, local_ops);
+    free(arg); // Free the dynamically allocated thread index
+    xSemaphoreGive(task_done_semphr); // Signal completion
+    vTaskDelete(nullptr);
+}
+
+TEST_CASE("Mixed read/write stress test", "[PocoConfigDb]")
+{
+    ESP_LOGD(TAG, "Starting mixed read/write stress test...");
+    
+    // Reset counters
+    read_locks_aquired = 0;
+    read_locks_failed = 0;
+    write_locks_acquired = 0;
+    write_locks_failed = 0;
+    stop_mixed_test = false;
+    
+    task_done_semphr = xSemaphoreCreateCounting(NUM_READ_LOCKS * 2, 0);
+    TEST_ASSERT_NOT_NULL(task_done_semphr);
+    
+    // Create mix of reader and writer tasks
+    for (int i = 0; i < NUM_READ_LOCKS; i++) {
+        int *task_index = (int*)malloc(sizeof(int));
+        *task_index = i;
+        
+        int core_num = i % 2;
+        int task_priority = (i % 4) + 2; // Vary priorities from 2-5
+        
+        xTaskCreatePinnedToCore(mixedReadWriteFunc,
+                                "MixedTestThread",
+                                2048,
+                                task_index,    // Use dynamically allocated index
+                                task_priority,
+                                nullptr,
+                                core_num);
+        ESP_LOGD(TAG, "Created mixed task %d on core %d.", i, core_num);
+        vTaskDelay(pdMS_TO_TICKS(10)); // Small delay between task creation
+    }
+    
+    // Wait for all tasks to start
+    for (int k = 0; k < NUM_READ_LOCKS; k++) {
+        xSemaphoreTake(task_done_semphr, portMAX_DELAY);
+    }
+    
+    ESP_LOGD(TAG, "All mixed test tasks started, running for 10 seconds...");
+    vTaskDelay(pdMS_TO_TICKS(10000)); // Reduced from 15 to 10 seconds
+    
+    stop_mixed_test = true;
+    
+    // Wait for all tasks to complete
+    for (int k = 0; k < NUM_READ_LOCKS; k++) {
+        xSemaphoreTake(task_done_semphr, portMAX_DELAY);
+    }
+    
+    vSemaphoreDelete(task_done_semphr);
+    
+    ESP_LOGI(TAG, "Mixed test results: Read locks: %d acquired, %d failed. Write locks: %d acquired, %d failed",
+             read_locks_aquired, read_locks_failed, write_locks_acquired, write_locks_failed);
+    
+    // With a proper shared mutex implementation, read locks should NEVER fail when no writer is holding the lock
+    // The ReliableSharedMutex uses try_lock_shared() with retry logic to handle reader contention properly
+    TEST_ASSERT_EQUAL_MESSAGE(0, read_locks_failed, "Read locks should never fail - this violates shared mutex semantics.");
+    TEST_ASSERT_EQUAL_MESSAGE(0, write_locks_failed, "Expected no write locks to fail during mixed test.");
+    TEST_ASSERT_GREATER_THAN_MESSAGE(0, write_locks_acquired, "Expected some write locks to be acquired.");
+    TEST_ASSERT_GREATER_THAN_MESSAGE(100, read_locks_aquired, "Expected substantial read lock acquisitions.");
+}
+
+// Torture test with rapid task creation/deletion
+static volatile int torture_read_locks = 0;
+static volatile int torture_read_failures = 0;
+
+static void tortureReadFunc(void *arg)
+{
+    int *args = (int *)arg;
+    int threadIndex = args[0];
+    int iterations = args[1];
+    
+    for (int i = 0; i < iterations; i++) {
+        if (auto dbAccess = MyConfigDbManager::getInstance().getReadAccess()) {
+            torture_read_locks++;
+        } else {
+            torture_read_failures++;
+            ESP_LOGE(TAG, "Torture thread %d failed read lock on iteration %d", threadIndex, i);
+        }
+        
+        // Micro delay to create maximum contention
+        if (i % 10 == 0) {
+            vTaskDelay(1);
+        }
+    }
+    
+    free(args); // Free the dynamically allocated args
+    xSemaphoreGive(task_done_semphr);
+    vTaskDelete(nullptr);
+}
+
+TEST_CASE("Torture test - rapid task creation", "[PocoConfigDb]")
+{
+    ESP_LOGD(TAG, "Starting torture test...");
+    
+    torture_read_locks = 0;
+    torture_read_failures = 0;
+    
+    const int TORTURE_WAVES = 5; // Number of waves of task creation
+    const int TASKS_PER_WAVE = 15; // Tasks per wave
+    const int ITERATIONS_PER_TASK = 50; // Operations per task
+    
+    for (int wave = 0; wave < TORTURE_WAVES; wave++) {
+        ESP_LOGD(TAG, "Starting torture wave %d/%d", wave + 1, TORTURE_WAVES);
+        
+        task_done_semphr = xSemaphoreCreateCounting(TASKS_PER_WAVE, 0);
+        TEST_ASSERT_NOT_NULL(task_done_semphr);
+        
+        // Create tasks rapidly
+        for (int i = 0; i < TASKS_PER_WAVE; i++) {
+            int *task_args = (int*)malloc(2 * sizeof(int));
+            task_args[0] = wave * TASKS_PER_WAVE + i; // thread index
+            task_args[1] = ITERATIONS_PER_TASK;       // iterations
+            
+            xTaskCreatePinnedToCore(tortureReadFunc,
+                                    "TortureTask",
+                                    2048, // Larger stack to prevent overflow
+                                    task_args,
+                                    3 + (i % 3), // Varying priorities
+                                    nullptr,
+                                    i % 2); // Alternate cores
+        }
+        
+        // Wait for all tasks in this wave to complete
+        for (int k = 0; k < TASKS_PER_WAVE; k++) {
+            xSemaphoreTake(task_done_semphr, portMAX_DELAY);
+        }
+        
+        vSemaphoreDelete(task_done_semphr);
+        
+        ESP_LOGD(TAG, "Wave %d complete. Total: %d locks, %d failures", 
+                 wave + 1, torture_read_locks, torture_read_failures);
+                 
+        // Brief pause between waves
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    ESP_LOGI(TAG, "Torture test complete: %d locks acquired, %d failures", 
+             torture_read_locks, torture_read_failures);
+    
+    TEST_ASSERT_EQUAL_MESSAGE(0, torture_read_failures, "Expected no failures in torture test.");
+    TEST_ASSERT_GREATER_THAN_MESSAGE(TORTURE_WAVES * TASKS_PER_WAVE * ITERATIONS_PER_TASK * 0.8, 
+                                     torture_read_locks, "Expected most lock attempts to succeed.");
+}
+
+// Extended stress test - longer duration
+TEST_CASE("Extended stress test - 60 seconds", "[PocoConfigDb]")
+{
+    ESP_LOGD(TAG, "Starting extended stress test (60 seconds)...");
+    
+    read_locks_aquired = 0;
+    read_locks_failed = 0;
+    stop_stress_test = false;
+    
+    task_done_semphr = xSemaphoreCreateCounting(NUM_READ_LOCKS * 2, 0);
+    TEST_ASSERT_NOT_NULL(task_done_semphr);
+    
+    // Create stress test tasks
+    for (int i = 0; i < NUM_READ_LOCKS; i++) {
+        int core_num = i % 2;
+        int task_priority = (i % 4) + 2;
+        
+        int *task_index = (int*)malloc(sizeof(int));
+        *task_index = i;
+        
+        xTaskCreatePinnedToCore(stressReadLockFunc,
+                                "ExtendedStressTask",
+                                2048,
+                                task_index,
+                                task_priority,
+                                nullptr,
+                                core_num);
+        ESP_LOGD(TAG, "Created extended stress task %d.", i);
+    }
+    
+    // Wait for all tasks to start
+    for (int k = 0; k < NUM_READ_LOCKS; k++) {
+        xSemaphoreTake(task_done_semphr, portMAX_DELAY);
+    }
+    
+    ESP_LOGD(TAG, "Extended stress test running for 60 seconds...");
+    
+    // Log progress every 10 seconds
+    for (int sec = 0; sec < 60; sec += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        ESP_LOGI(TAG, "Extended test progress: %d seconds, %d locks acquired, %d failures", 
+                 sec + 10, read_locks_aquired, read_locks_failed);
+    }
+    
+    stop_stress_test = true;
+    
+    // Wait for all tasks to complete
+    for (int k = 0; k < NUM_READ_LOCKS; k++) {
+        xSemaphoreTake(task_done_semphr, portMAX_DELAY);
+    }
+    
+    vSemaphoreDelete(task_done_semphr);
+    
+    ESP_LOGI(TAG, "Extended stress test complete: %d locks acquired, %d failures", 
+             read_locks_aquired, read_locks_failed);
+    
+    TEST_ASSERT_EQUAL_MESSAGE(0, read_locks_failed, "Expected no failures in extended stress test.");
+    TEST_ASSERT_GREATER_THAN_MESSAGE(100000, read_locks_aquired, "Expected many lock acquisitions in 60 seconds.");
+}
+
 #endif // !DISABLE_STRESS_TEST
