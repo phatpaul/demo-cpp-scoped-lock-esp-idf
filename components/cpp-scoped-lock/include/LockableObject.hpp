@@ -8,29 +8,24 @@
 #pragma once
 
 #include <shared_mutex>
-#include "ReliableSharedMutex.hpp"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
+#include <chrono>
 
 template <typename protectedType>
 class LockableObject
 {
 public:
-    // Option 1: Use reliable FreeRTOS-based implementation
-    using mutex_type = ReliableSharedMutex;
-    using read_lock = shared_lock<mutex_type>;
-    using write_lock = unique_lock<mutex_type>;
+    using mutex_type = std::shared_timed_mutex; // shared_timed_mutex to allow timed locks
+    using read_lock = std::shared_lock<mutex_type>; // shared_lock for read access (multiple readers)
+    using write_lock = std::unique_lock<mutex_type>; // unique_lock for write access (exclusive)
 
-    // Option 2: Keep std implementation for comparison (comment out above and uncomment below)
-    // using mutex_type = std::shared_mutex;
-    // using read_lock = std::shared_lock<mutex_type>;
-    // using write_lock = std::unique_lock<mutex_type>;
+    // Ensure the minimum timeout duration to avoid contention on the mutex
+    static constexpr auto minBlockTime = std::chrono::milliseconds(10);
+    static constexpr auto maxBlockTime = std::chrono::milliseconds::max();
 
 private:
-    mutable mutex_type m_mutex{};
-    protectedType m_protected{};
-    static inline LockableObject *sm_instance{}; // Optional instance pointer
+    mutable mutex_type m_mutex{}; // Mutex for protecting access to the object
+    protectedType m_protected{}; // The protected object
+    static inline LockableObject *sm_instance{}; // Optional static pointer to a single instance of LockableObject<protectedType>
 
 public:
     // Optional Set Static Instance (when used as a singleton)
@@ -57,10 +52,11 @@ public:
     class ScopedAccess
     {
     public:
-        // Constructor
-        ScopedAccess(mutex_type &m, objType &obj, bool blocking = true)
+        // Constructor with timeout
+        template<class Rep, class Period>
+        ScopedAccess(mutex_type &m, objType &obj, const std::chrono::duration<Rep, Period>& timeout_duration)
             : m_protectedRef{obj},
-              m_lock{blocking ? lockType(m) : lockType(m, std::try_to_lock)}
+              m_lock{m, timeout_duration}
         {
             // Direct initialization in member initializer list
         }
@@ -87,40 +83,36 @@ public:
     using ReadAccess = ScopedAccess<protectedType, read_lock>;
     using WriteAccess = ScopedAccess<protectedType, write_lock>;
 
+
+
+    // Returns a read access object with the default timeout duration (10ms).
     ReadAccess getReadAccess()
     {
-        return ReadAccess(m_mutex, m_protected, false); // don't block for read
+        return ReadAccess(m_mutex, m_protected, minBlockTime);
     }
 
-    // Alternative with retry logic for ESP-IDF shared_mutex bug workaround
-    ReadAccess getReadAccessWithRetry(int max_retries = 3)
+    // Returns a read access object with the specified timeout duration. It will block until the timeout is reached.
+    template<class Rep, class Period>
+    ReadAccess getReadAccess(const std::chrono::duration<Rep, Period>& timeout_duration)
     {
-        static const char* TAG = "LockableObject";
-        for (int attempt = 0; attempt < max_retries; ++attempt) {
-            auto access = ReadAccess(m_mutex, m_protected, false);
-            if (access) {
-                if (attempt > 0) {
-                    ESP_LOGW(TAG, "Read lock succeeded on attempt %d (task: %s)",
-                             attempt + 1, pcTaskGetTaskName(xTaskGetCurrentTaskHandle()));
-                }
-                return access;
-            }
-            ESP_LOGW(TAG, "Read lock failed on attempt %d (task: %s), retrying...",
-                     attempt + 1, pcTaskGetTaskName(xTaskGetCurrentTaskHandle()));
-            // Brief delay before retry
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
-        // Final attempt
-        auto final_access = ReadAccess(m_mutex, m_protected, false);
-        if (!final_access) {
-            ESP_LOGE(TAG, "Read lock failed after %d attempts (task: %s)",
-                     max_retries + 1, pcTaskGetTaskName(xTaskGetCurrentTaskHandle()));
-        }
-        return final_access;
+        // Ensure the minimum timeout duration to avoid contention on the mutex
+        auto actual_timeout = timeout_duration < minBlockTime ? minBlockTime : timeout_duration;
+        return ReadAccess(m_mutex, m_protected, actual_timeout);
     }
+
+    // Returns a write access object with the default timeout duration (max).
     WriteAccess getWriteAccess()
     {
-        return WriteAccess(m_mutex, m_protected, true); // block for write
+        return WriteAccess(m_mutex, m_protected, maxBlockTime);
+    }
+
+    // Returns a write access object with the specified timeout duration. It will block until the timeout is reached.
+    template<class Rep, class Period>
+    WriteAccess getWriteAccess(const std::chrono::duration<Rep, Period>& timeout_duration)
+    {
+        // Ensure the minimum timeout duration to avoid contention on the mutex
+        auto actual_timeout = timeout_duration < minBlockTime ? minBlockTime : timeout_duration;
+        return WriteAccess(m_mutex, m_protected, actual_timeout);
     }
 
     // Clear the protected object, effectively resetting it.
